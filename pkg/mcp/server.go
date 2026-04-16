@@ -215,6 +215,14 @@ func (s *Server) registerDefaultTools() {
 	s.tools["memory_get"] = func(args map[string]interface{}) (interface{}, error) {
 		key, _ := args["key"].(string)
 		
+		// Input validation
+		if key == "" {
+			return nil, fmt.Errorf("key is required")
+		}
+		if utf8.RuneCountInString(key) > 256 {
+			return nil, fmt.Errorf("key exceeds maximum length of 256 characters")
+		}
+		
 		s.mu.RLock()
 		dbConn := s.db
 		s.mu.RUnlock()
@@ -234,8 +242,15 @@ func (s *Server) registerDefaultTools() {
 		key, _ := args["key"].(string)
 		value, _ := args["value"].(string)
 		
+		// Input validation
 		if key == "" {
 			return nil, fmt.Errorf("key is required")
+		}
+		if utf8.RuneCountInString(key) > 256 {
+			return nil, fmt.Errorf("key exceeds maximum length of 256 characters")
+		}
+		if utf8.RuneCountInString(value) > 65536 {
+			return nil, fmt.Errorf("value exceeds maximum length of 65536 characters")
 		}
 		
 		s.mu.RLock()
@@ -258,19 +273,30 @@ func (s *Server) registerDefaultTools() {
 	s.tools["semantic_search"] = func(args map[string]interface{}) (interface{}, error) {
 		query, _ := args["query"].(string)
 		limit, _ := args["limit"].(int)
-		if limit == 0 {
+		
+		// Input validation
+		if query == "" {
+			return nil, fmt.Errorf("query is required")
+		}
+		if utf8.RuneCountInString(query) > 10000 {
+			return nil, fmt.Errorf("query exceeds maximum length of 10000 characters")
+		}
+		if limit <= 0 {
 			limit = 10
 		}
-
+		if limit > 1000 {
+			limit = 1000
+		}
+		
 		var rawResults []map[string]interface{}
-
+		
 		s.mu.RLock()
 		dbConn := s.db
 		s.mu.RUnlock()
-
+		
 		if dbConn != nil && query != "" {
 			// Try FTS5 search first, fall back to LIKE if FTS5 not available
-			results, err := dbConn.SearchEmbeddings(query, limit)
+			embedResults, err := dbConn.SearchEmbeddings(query, limit)
 			if err != nil {
 				// Fall back to LIKE-based search
 				rows, err := dbConn.Query(`
@@ -293,7 +319,7 @@ func (s *Server) registerDefaultTools() {
 				}
 			} else {
 				// Use FTS5 results
-				for _, emb := range results {
+				for _, emb := range embedResults {
 					rawResults = append(rawResults, map[string]interface{}{
 						"id":      emb.DocumentID,
 						"content": emb.Content,
@@ -303,13 +329,13 @@ func (s *Server) registerDefaultTools() {
 				}
 			}
 		}
-
+		
 		// Convert to []interface{} for JSON-RPC compatibility
-		results := make([]interface{}, len(rawResults))
+		finalResults := make([]interface{}, len(rawResults))
 		for i, r := range rawResults {
-			results[i] = r
+			finalResults[i] = r
 		}
-		return map[string]interface{}{"results": results, "query": query}, nil
+		return map[string]interface{}{"results": finalResults, "query": query}, nil
 	}
 }
 
