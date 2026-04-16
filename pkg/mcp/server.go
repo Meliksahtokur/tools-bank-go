@@ -8,8 +8,10 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"unicode/utf8"
 
 	"github.com/egesut/tools-bank-go/pkg/db"
+	"github.com/google/uuid"
 )
 
 // Server represents the MCP server instance
@@ -113,11 +115,19 @@ func (s *Server) registerDefaultTools() {
 		title, _ := args["title"].(string)
 		description, _ := args["description"].(string)
 		
+		// Input validation
 		if title == "" {
 			return nil, fmt.Errorf("title is required")
 		}
+		if utf8.RuneCountInString(title) > 256 {
+			return nil, fmt.Errorf("title exceeds maximum length of 256 characters")
+		}
+		if utf8.RuneCountInString(description) > 65536 {
+			return nil, fmt.Errorf("description exceeds maximum length of 65536 characters")
+		}
 		
-		taskID := fmt.Sprintf("task-%d", os.Getpid())
+		// Use UUID for unique task ID
+		taskID := fmt.Sprintf("task-%s", uuid.New().String()[:8])
 		
 		s.mu.RLock()
 		dbConn := s.db
@@ -147,6 +157,17 @@ func (s *Server) registerDefaultTools() {
 		
 		if taskID == "" {
 			return nil, fmt.Errorf("id is required")
+		}
+		
+		// Status validation
+		validStatuses := map[string]bool{
+			"pending":     true,
+			"in_progress": true,
+			"completed":   true,
+			"cancelled":   true,
+		}
+		if !validStatuses[status] {
+			return nil, fmt.Errorf("invalid status: %s. Valid values: pending, in_progress, completed, cancelled", status)
 		}
 		
 		s.mu.RLock()
@@ -200,7 +221,7 @@ func (s *Server) registerDefaultTools() {
 		
 		if dbConn != nil && key != "" {
 			var value string
-			err := dbConn.QueryRow("SELECT value FROM memory WHERE key = ? AND (expires_at IS NULL OR expires_at > datetime('now'))", key).Scan(&value)
+			err := dbConn.QueryRow("SELECT value FROM memory WHERE key = ? AND (expires_at IS NULL OR expires_at > datetime('now', 'utc'))", key).Scan(&value)
 			if err == nil {
 				return map[string]interface{}{"key": key, "value": value, "found": true}, nil
 			}
@@ -240,34 +261,49 @@ func (s *Server) registerDefaultTools() {
 		if limit == 0 {
 			limit = 10
 		}
-		
+
 		var rawResults []map[string]interface{}
-		
+
 		s.mu.RLock()
 		dbConn := s.db
 		s.mu.RUnlock()
-		
+
 		if dbConn != nil && query != "" {
-			rows, err := dbConn.Query(`
-				SELECT document_id, content, created_at FROM embeddings
-				WHERE content LIKE ? ORDER BY created_at DESC LIMIT ?
-			`, "%"+query+"%", limit)
-			if err == nil {
-				defer rows.Close()
-				for rows.Next() {
-					var docID, content, created string
-					if err := rows.Scan(&docID, &content, &created); err == nil {
-						rawResults = append(rawResults, map[string]interface{}{
-							"id":        docID,
-							"content":   content,
-							"score":     0.8,
-							"created":   created,
-						})
+			// Try FTS5 search first, fall back to LIKE if FTS5 not available
+			results, err := dbConn.SearchEmbeddings(query, limit)
+			if err != nil {
+				// Fall back to LIKE-based search
+				rows, err := dbConn.Query(`
+					SELECT document_id, content, created_at FROM embeddings
+					WHERE content LIKE ? ORDER BY created_at DESC LIMIT ?
+				`, "%"+query+"%", limit)
+				if err == nil {
+					defer rows.Close()
+					for rows.Next() {
+						var docID, content, created string
+						if err := rows.Scan(&docID, &content, &created); err == nil {
+							rawResults = append(rawResults, map[string]interface{}{
+								"id":        docID,
+								"content":   content,
+								"score":     0.8,
+								"created":   created,
+							})
+						}
 					}
+				}
+			} else {
+				// Use FTS5 results
+				for _, emb := range results {
+					rawResults = append(rawResults, map[string]interface{}{
+						"id":      emb.DocumentID,
+						"content": emb.Content,
+						"score":   0.95, // FTS5 gives better relevance
+						"created": emb.CreatedAt,
+					})
 				}
 			}
 		}
-		
+
 		// Convert to []interface{} for JSON-RPC compatibility
 		results := make([]interface{}, len(rawResults))
 		for i, r := range rawResults {

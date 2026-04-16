@@ -47,6 +47,11 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
+	// Initialize FTS5 for semantic search
+	if err := db.InitFTS5(); err != nil {
+		utils.Warn("FTS5 initialization failed, semantic search will use fallback", map[string]any{"error": err.Error()})
+	}
+
 	utils.Info("database opened", map[string]any{"path": path})
 	return db, nil
 }
@@ -136,6 +141,90 @@ func (db *DB) QueryRow(query string, args ...any) *sql.Row {
 // Begin starts a new transaction.
 func (db *DB) Begin() (*sql.Tx, error) {
 	return db.conn.Begin()
+}
+
+// InitFTS5 creates FTS5 virtual table for semantic search
+func (db *DB) InitFTS5() error {
+	// Create FTS5 table if not exists
+	_, err := db.conn.Exec(`
+		CREATE VIRTUAL TABLE IF NOT EXISTS embeddings_fts USING fts5(
+			document_id,
+			content,
+			content='embeddings',
+			content_rowid='id'
+		);
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create FTS5 table: %w", err)
+	}
+
+	// Create triggers to keep FTS5 in sync with embeddings table
+	triggers := []string{
+		// Insert trigger
+		`CREATE TRIGGER IF NOT EXISTS embeddings_ai AFTER INSERT ON embeddings BEGIN
+			INSERT INTO embeddings_fts(rowid, document_id, content) VALUES (new.id, new.document_id, new.content);
+		END`,
+		// Delete trigger
+		`CREATE TRIGGER IF NOT EXISTS embeddings_ad AFTER DELETE ON embeddings BEGIN
+			INSERT INTO embeddings_fts(embeddings_fts, rowid, document_id, content) VALUES('delete', old.id, old.document_id, old.content);
+		END`,
+		// Update trigger
+		`CREATE TRIGGER IF NOT EXISTS embeddings_au AFTER UPDATE ON embeddings BEGIN
+			INSERT INTO embeddings_fts(embeddings_fts, rowid, document_id, content) VALUES('delete', old.id, old.document_id, old.content);
+			INSERT INTO embeddings_fts(rowid, document_id, content) VALUES (new.id, new.document_id, new.content);
+		END`,
+	}
+
+	for _, trigger := range triggers {
+		if _, err := db.conn.Exec(trigger); err != nil {
+			utils.Warn("trigger creation failed (may already exist)", map[string]any{"error": err.Error()})
+		}
+	}
+
+	utils.Info("FTS5 virtual table initialized")
+	return nil
+}
+
+// SearchEmbeddings performs FTS5 search
+func (db *DB) SearchEmbeddings(query string, limit int) ([]Embedding, error) {
+	rows, err := db.Query(`
+		SELECT e.id, e.document_id, e.content, e.embedding, e.model, e.created_at, e.metadata
+		FROM embeddings e
+		JOIN embeddings_fts fts ON e.id = fts.rowid
+		WHERE embeddings_fts MATCH ?
+		ORDER BY rank
+		LIMIT ?
+	`, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("FTS5 search failed: %w", err)
+	}
+	defer rows.Close()
+
+	var results []Embedding
+	for rows.Next() {
+		var emb Embedding
+		var metadata sql.NullString
+		if err := rows.Scan(&emb.ID, &emb.DocumentID, &emb.Content, &emb.Embedding, &emb.Model, &emb.CreatedAt, &metadata); err != nil {
+			continue
+		}
+		if metadata.Valid {
+			emb.Metadata = metadata.String
+		}
+		results = append(results, emb)
+	}
+
+	return results, nil
+}
+
+// Embedding represents a stored embedding
+type Embedding struct {
+	ID         int64
+	DocumentID string
+	Content    string
+	Embedding  []byte
+	Model      string
+	CreatedAt  string
+	Metadata   string
 }
 
 // Ping checks if the database connection is alive.
