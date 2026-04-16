@@ -1,0 +1,88 @@
+# golangci-lint configuration for tools-bank-go
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+  skip-dirs:
+    - vendor
+    - .git
+    - bin
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gosec
+    - gochecknoinits
+    - goconst
+    - gocritic
+    - misspell
+    - nakedret
+    - prealloc
+    - unconvert
+    - unparam
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+  govet:
+    enable-all: true
+  gocyclo:
+    min-complexity: 15
+  gocritic:
+    enabled-checks:
+      - appendAssign
+      - argOrder
+      - badCond
+      - boolExpr
+      - builtinShadow
+      - captLocal
+      - commentedOutCode
+      - defaultCase
+      - elseIf
+      - emptyFallthrough
+      - equal
+      - errorReturn
+      - errorStrings
+      - exitAfterDefer
+      - hexLiteral
+      - hugeParam
+      - ifChain
+      - initClause
+      - methodSignatures
+      - nilValReturn
+      - offBy1
+      - rangeExprCopy
+      - receiverN
+      - redundantSprint
+      - selfAssignment
+      - sloppyReassign
+      - switchTrue
+      - typeSwitchVar
+      - unnamedResult
+      - unnecessaryBlock
+      - unusedParam
+      - writeStr
+  nakedret:
+    max-func-lines: 30
+  unparam:
+    check-builtin: false
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gocyclo
+        - errcheck
+        - gosec
+    - path: vendor/
+      linters:
+        - staticcheck
+  max-issues-per-linter: 0
+  max-same-issues: 0

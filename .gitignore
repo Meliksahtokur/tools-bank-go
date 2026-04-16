@@ -1,0 +1,6 @@
+
+# Build outputs
+bin/
+mcp-server
+*.exe
+coverage.out
